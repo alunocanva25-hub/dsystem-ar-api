@@ -1,26 +1,13 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from pathlib import Path
-from datetime import datetime
+from pydantic import BaseModel
 import sqlite3
-import shutil
-import re
-import os
+from pathlib import Path
 
-APP_VERSION = "V1.0.0.4"
-BASE_DIR = Path(__file__).resolve().parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-DB_PATH = BASE_DIR / "dsystem_ar_api.db"
+APP_VERSION = "V1.0.0.5_LOGIN_USERS"
 
-UPLOAD_DIR.mkdir(exist_ok=True)
-
-app = FastAPI(
-    title="DSYSTEM AR API",
-    version=APP_VERSION,
-    description="API ponte para DSYSTEM AR Scanner Mobile e AR Painel."
-)
+app = FastAPI(title="DSYSTEM AR API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,293 +17,173 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+DB = Path("database.db")
+
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
-    with get_conn() as conn:
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS ars (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            original_name TEXT,
-            file_name TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            instalacao TEXT,
-            medidor TEXT,
-            nome_cliente TEXT,
-            status TEXT DEFAULT 'Pendente',
-            origem TEXT DEFAULT 'api',
-            observacao TEXT,
-            operador_usuario TEXT,
-            operador_nome TEXT,
-            operador_perfil TEXT
-        )
-        """)
-        cols = [r['name'] for r in conn.execute('PRAGMA table_info(ars)').fetchall()]
-        if 'operador_usuario' not in cols:
-            conn.execute("ALTER TABLE ars ADD COLUMN operador_usuario TEXT")
-        if 'operador_nome' not in cols:
-            conn.execute("ALTER TABLE ars ADD COLUMN operador_nome TEXT")
-        if 'operador_perfil' not in cols:
-            conn.execute("ALTER TABLE ars ADD COLUMN operador_perfil TEXT")
-        conn.commit()
+    conn = get_conn()
+    cur = conn.cursor()
 
-def sanitize_filename(name: str) -> str:
-    name = name.strip().replace(" ", "_")
-    name = re.sub(r"[^A-Za-z0-9_.\-]", "", name)
-    return name or "arquivo.pdf"
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario TEXT UNIQUE,
+        nome TEXT,
+        senha TEXT,
+        perfil TEXT
+    )
+    """)
 
-def build_name(instalacao: str = "", medidor: str = "", ext: str = ".pdf") -> str:
-    instalacao = (instalacao or "").strip()
-    medidor = (medidor or "").strip()
-    if instalacao or medidor:
-        return f"AR_CARTACONVITE_INST_{instalacao}_MD_{medidor}{ext}"
-    with get_conn() as conn:
-        count = conn.execute(
-            "SELECT COUNT(*) AS total FROM ars WHERE file_name LIKE 'AR_CARTACONVITE_PAG.%'"
-        ).fetchone()["total"] + 1
-    return f"AR_CARTACONVITE_PAG.{count:02d}{ext}"
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS ar_records(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_name TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    admin = cur.execute(
+        "SELECT * FROM users WHERE usuario='admin'"
+    ).fetchone()
+
+    if not admin:
+        cur.execute("""
+        INSERT INTO users(usuario,nome,senha,perfil)
+        VALUES(?,?,?,?)
+        """, ("admin", "Administrador", "admin123", "admin"))
+
+    conn.commit()
+    conn.close()
 
 init_db()
+
+class LoginRequest(BaseModel):
+    usuario: str
+    senha: str
+
+class CreateUserRequest(BaseModel):
+    usuario: str
+    nome: str
+    senha: str
+    perfil: str = "operador"
+
+class ChangePasswordRequest(BaseModel):
+    usuario: str
+    senha_atual: str
+    nova_senha: str
 
 @app.get("/")
 def root():
     return {
         "app": "DSYSTEM AR API",
         "version": APP_VERSION,
-        "status": "online",
-        "endpoints": [
-            "/api/status",
-            "/api/ars",
-            "/api/upload",
-            "/api/ars/{id}",
-            "/api/ars/{id}/download",
-            "/api/ars/{id}/view"
-        ]
+        "status": "online"
     }
 
-@app.get("/api/status")
-def status():
-    with get_conn() as conn:
-        total = conn.execute("SELECT COUNT(*) AS total FROM ars").fetchone()["total"]
-    return {"status": "online", "version": APP_VERSION, "total_ars": total}
+@app.post("/api/login")
+def login(data: LoginRequest):
+    conn = get_conn()
+    cur = conn.cursor()
 
-@app.post("/api/upload")
-async def upload_ar(
-    file: UploadFile = File(...),
-    instalacao: str = Form(""),
-    medidor: str = Form(""),
-    nome_cliente: str = Form(""),
-    origem: str = Form("mobile"),
-    operador_usuario: str = Form(""),
-    operador_nome: str = Form(""),
-    operador_perfil: str = Form("")
-):
-    original = file.filename or "arquivo.pdf"
-    ext = Path(original).suffix.lower() or ".pdf"
-    if ext not in [".pdf", ".jpg", ".jpeg", ".png", ".webp"]:
-        raise HTTPException(status_code=400, detail="Formato não permitido.")
+    user = cur.execute("""
+    SELECT id,usuario,nome,perfil
+    FROM users
+    WHERE usuario=? AND senha=?
+    """, (data.usuario, data.senha)).fetchone()
 
-    final_name = sanitize_filename(build_name(instalacao, medidor, ext))
-    target = UPLOAD_DIR / final_name
+    conn.close()
 
-    # evita sobrescrever
-    if target.exists():
-        stem = target.stem
-        suffix = target.suffix
-        n = 2
-        while (UPLOAD_DIR / f"{stem}_{n}{suffix}").exists():
-            n += 1
-        target = UPLOAD_DIR / f"{stem}_{n}{suffix}"
-        final_name = target.name
+    if not user:
+        raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
 
-    with target.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    return dict(user)
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with get_conn() as conn:
-        cur = conn.execute("""
-            INSERT INTO ars (
-                created_at, original_name, file_name, file_path,
-                instalacao, medidor, nome_cliente, status, origem,
-                operador_usuario, operador_nome, operador_perfil
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            now, original, final_name, str(target),
-            instalacao.strip() or None,
-            medidor.strip() or None,
-            nome_cliente.strip() or None,
-            "Pendente",
-            origem,
-            operador_usuario.strip() or None,
-            operador_nome.strip() or None,
-            operador_perfil.strip() or None
-        ))
-        conn.commit()
-        new_id = cur.lastrowid
+@app.get("/api/users")
+def list_users():
+    conn = get_conn()
+    cur = conn.cursor()
 
-    return {
-        "ok": True,
-        "id": new_id,
-        "file_name": final_name,
-        "instalacao": instalacao,
-        "medidor": medidor,
-        "nome_cliente": nome_cliente,
-        "operador_usuario": operador_usuario,
-        "operador_nome": operador_nome,
-        "operador_perfil": operador_perfil,
-        "status": "Pendente"
-    }
+    users = cur.execute("""
+    SELECT id,usuario,nome,perfil
+    FROM users
+    ORDER BY id DESC
+    """).fetchall()
 
-@app.get("/api/ars")
-def list_ars(
-    instalacao: str = "",
-    medidor: str = "",
-    nome_cliente: str = "",
-    status: str = ""
-):
-    sql = "SELECT * FROM ars WHERE 1=1"
-    params = []
+    conn.close()
 
-    if instalacao:
-        sql += " AND instalacao LIKE ?"
-        params.append(f"%{instalacao}%")
-    if medidor:
-        sql += " AND medidor LIKE ?"
-        params.append(f"%{medidor}%")
-    if nome_cliente:
-        sql += " AND nome_cliente LIKE ?"
-        params.append(f"%{nome_cliente}%")
-    if status:
-        sql += " AND status = ?"
-        params.append(status)
+    return [dict(x) for x in users]
 
-    sql += " ORDER BY id DESC"
+@app.post("/api/users")
+def create_user(data: CreateUserRequest):
+    conn = get_conn()
+    cur = conn.cursor()
 
-    with get_conn() as conn:
-        rows = conn.execute(sql, params).fetchall()
+    exists = cur.execute("""
+    SELECT id FROM users WHERE usuario=?
+    """, (data.usuario,)).fetchone()
 
-    return [dict(row) for row in rows]
+    if exists:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Usuário já existe")
 
-@app.get("/api/ars/{ar_id}")
-def get_ar(ar_id: int):
-    with get_conn() as conn:
-        row = conn.execute("SELECT * FROM ars WHERE id = ?", (ar_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="AR não encontrado.")
-    return dict(row)
+    cur.execute("""
+    INSERT INTO users(usuario,nome,senha,perfil)
+    VALUES(?,?,?,?)
+    """, (
+        data.usuario,
+        data.nome,
+        data.senha,
+        data.perfil
+    ))
 
-@app.put("/api/ars/{ar_id}")
-def update_ar(
-    ar_id: int,
-    instalacao: str = Form(""),
-    medidor: str = Form(""),
-    nome_cliente: str = Form(""),
-    status: str = Form("Pendente"),
-    observacao: str = Form(""),
-    operador_usuario: str = Form(""),
-    operador_nome: str = Form(""),
-    operador_perfil: str = Form("")
-):
-    with get_conn() as conn:
-        row = conn.execute("SELECT * FROM ars WHERE id = ?", (ar_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="AR não encontrado.")
+    conn.commit()
+    conn.close()
 
-        old_path = Path(row["file_path"])
-        ext = old_path.suffix or ".pdf"
-        new_name = sanitize_filename(build_name(instalacao, medidor, ext))
-        new_path = UPLOAD_DIR / new_name
+    return {"success": True}
 
-        if old_path.exists() and old_path.name != new_name:
-            if new_path.exists():
-                stem = new_path.stem
-                suffix = new_path.suffix
-                n = 2
-                while (UPLOAD_DIR / f"{stem}_{n}{suffix}").exists():
-                    n += 1
-                new_path = UPLOAD_DIR / f"{stem}_{n}{suffix}"
-                new_name = new_path.name
-            old_path.rename(new_path)
-        else:
-            new_path = old_path
-            new_name = old_path.name
+@app.put("/api/change-password")
+def change_password(data: ChangePasswordRequest):
+    conn = get_conn()
+    cur = conn.cursor()
 
-        conn.execute("""
-            UPDATE ars
-            SET instalacao = ?, medidor = ?, nome_cliente = ?, status = ?,
-                observacao = ?, file_name = ?, file_path = ?,
-                operador_usuario = COALESCE(NULLIF(?, ''), operador_usuario),
-                operador_nome = COALESCE(NULLIF(?, ''), operador_nome),
-                operador_perfil = COALESCE(NULLIF(?, ''), operador_perfil)
-            WHERE id = ?
-        """, (
-            instalacao.strip() or None,
-            medidor.strip() or None,
-            nome_cliente.strip() or None,
-            status,
-            observacao.strip() or None,
-            new_name,
-            str(new_path),
-            operador_usuario.strip(),
-            operador_nome.strip(),
-            operador_perfil.strip(),
-            ar_id
-        ))
-        conn.commit()
+    user = cur.execute("""
+    SELECT * FROM users
+    WHERE usuario=? AND senha=?
+    """, (data.usuario, data.senha_atual)).fetchone()
 
-    return {"ok": True, "id": ar_id, "file_name": new_name, "status": status}
+    if not user:
+        conn.close()
+        raise HTTPException(status_code=401, detail="Senha atual inválida")
 
-@app.delete("/api/ars/{ar_id}")
-def delete_ar(ar_id: int):
-    with get_conn() as conn:
-        row = conn.execute("SELECT * FROM ars WHERE id = ?", (ar_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="AR não encontrado.")
+    cur.execute("""
+    UPDATE users
+    SET senha=?
+    WHERE usuario=?
+    """, (data.nova_senha, data.usuario))
 
-        path = Path(row["file_path"])
-        if path.exists():
-            path.unlink()
+    conn.commit()
+    conn.close()
 
-        conn.execute("DELETE FROM ars WHERE id = ?", (ar_id,))
-        conn.commit()
+    return {"success": True}
 
-    return {"ok": True, "deleted": ar_id}
+@app.delete("/api/users/{usuario}")
+def delete_user(usuario: str):
+    if usuario == "admin":
+        raise HTTPException(status_code=400, detail="Admin não pode ser removido")
 
-@app.get("/api/ars/{ar_id}/download")
-def download_ar(ar_id: int):
-    with get_conn() as conn:
-        row = conn.execute("SELECT * FROM ars WHERE id = ?", (ar_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="AR não encontrado.")
+    conn = get_conn()
+    cur = conn.cursor()
 
-    path = Path(row["file_path"])
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
+    cur.execute("""
+    DELETE FROM users
+    WHERE usuario=?
+    """, (usuario,))
 
-    return FileResponse(path, filename=row["file_name"], media_type="application/octet-stream")
+    conn.commit()
+    conn.close()
 
-@app.get("/api/ars/{ar_id}/view")
-def view_ar(ar_id: int):
-    with get_conn() as conn:
-        row = conn.execute("SELECT * FROM ars WHERE id = ?", (ar_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="AR não encontrado.")
-
-    path = Path(row["file_path"])
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
-
-    ext = path.suffix.lower()
-    media = "application/pdf" if ext == ".pdf" else "image/jpeg"
-    return FileResponse(path, media_type=media)
-
-@app.get("/TESTE_UPLOAD.html")
-def teste_upload_html():
-    teste = BASE_DIR / "TESTE_UPLOAD.html"
-    if not teste.exists():
-        raise HTTPException(status_code=404, detail="TESTE_UPLOAD.html não encontrado.")
-    return FileResponse(teste, media_type="text/html")
+    return {"success": True}
