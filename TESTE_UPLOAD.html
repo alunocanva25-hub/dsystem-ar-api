@@ -1,182 +1,43 @@
 <!doctype html>
 <html lang="pt-BR">
 <head>
-<meta charset="utf-8">
-<title>Teste Upload DSYSTEM AR API</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-:root{
-  --green:#2faf5f;
-  --green2:#259b51;
-  --bg:#f3f4f6;
-  --text:#111827;
-  --muted:#667085;
-  --border:#d0d5dd;
-  --danger:#d92d20;
-}
-body{font-family:Arial,sans-serif;background:var(--bg);margin:0;padding:28px;color:var(--text)}
-.card{max-width:760px;margin:auto;background:#fff;border-radius:16px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.08)}
-h1{margin:0 0 6px;font-size:24px}
-p{color:var(--muted)}
-label{display:block;font-weight:700;margin-top:14px}
-input{width:100%;box-sizing:border-box;padding:12px;border:1px solid var(--border);border-radius:10px;margin-top:6px}
-button{margin-top:18px;width:100%;padding:14px;border:0;border-radius:12px;background:var(--green);color:white;font-weight:800;cursor:pointer}
-button:hover{background:var(--green2)}
-pre{background:#111827;color:#d1fae5;border-radius:12px;padding:14px;white-space:pre-wrap;overflow:auto}
-.ok{color:#14833b;font-weight:800}
-.err{color:var(--danger);font-weight:800}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.hint{font-size:13px;color:#667085;margin-top:6px}
-@media(max-width:700px){.grid{grid-template-columns:1fr}}
-</style>
+  <meta charset="utf-8">
+  <title>DSYSTEM AR API - Teste Upload</title>
+  <style>
+    body{font-family:Arial;background:#0f172a;color:white;padding:32px}
+    form{max-width:520px;background:#111827;padding:24px;border-radius:16px}
+    label{display:block;margin-top:12px;font-weight:bold}
+    input,button{width:100%;padding:12px;margin-top:6px;border-radius:10px;border:0}
+    button{background:#16a34a;color:white;font-weight:bold;margin-top:18px}
+    pre{background:#020617;padding:16px;border-radius:12px;white-space:pre-wrap}
+  </style>
 </head>
 <body>
-<div class="card">
-<h1>DSYSTEM AR API — Teste de Upload</h1>
-<p>Selecione um PDF/imagem e envie para a API local.</p>
-
-<label>URL da API</label>
-<input id="apiBase" placeholder="Ex: http://localhost:8010">
-<div class="hint">Se esta página abriu pela própria API, deixe automático. Se abriu por arquivo/painel, informe a URL da API.</div>
-
-<form id="form">
-<label>Arquivo PDF ou imagem</label>
-<input id="file" name="file" type="file" accept=".pdf,image/*" required>
-
-<div class="grid">
-  <div>
+  <h1>DSYSTEM AR API - Teste Upload</h1>
+  <form id="form">
+    <label>Arquivo</label>
+    <input name="file" type="file" required>
     <label>Instalação</label>
-    <input name="instalacao" placeholder="Ex: 5394970">
-  </div>
-  <div>
+    <input name="instalacao">
     <label>Medidor</label>
-    <input name="medidor" placeholder="Ex: 11023212473">
-  </div>
-</div>
-
-<label>Nome Cliente</label>
-<input name="nome_cliente" placeholder="Opcional">
-
-<div class="grid">
-  <div>
+    <input name="medidor">
+    <label>Nome Cliente</label>
+    <input name="nome_cliente">
     <label>Operador Usuário</label>
-    <input name="operador_usuario" placeholder="Ex: operador1">
-  </div>
-  <div>
+    <input name="operador_usuario">
     <label>Operador Nome</label>
-    <input name="operador_nome" placeholder="Ex: João">
-  </div>
-</div>
-
-<label>Operador Perfil</label>
-<input name="operador_perfil" placeholder="admin ou operador">
-
-<button type="submit">ENVIAR PARA API</button>
-</form>
-
-<p id="msg"></p>
-<pre id="out">Aguardando envio...</pre>
-
-<button type="button" onclick="listar()">LISTAR REGISTROS</button>
-<button type="button" onclick="testarStatus()">TESTAR STATUS</button>
-</div>
-
-<script>
-const out = document.getElementById('out');
-const msg = document.getElementById('msg');
-const apiInput = document.getElementById('apiBase');
-
-function guessApiBase(){
-  // Se abriu em http://localhost:8010/TESTE_UPLOAD.html, usa a própria origem.
-  if (location.protocol.startsWith('http')) {
-    return location.origin;
-  }
-  return 'http://localhost:8010';
-}
-
-apiInput.value = guessApiBase();
-
-function apiBase(){
-  let v = apiInput.value.trim();
-  if (!v) v = guessApiBase();
-  return v.replace(/\/+$/, '');
-}
-
-function show(data){
-  out.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
-}
-
-async function testarStatus(){
-  msg.textContent = 'Testando conexão...';
-  msg.className = '';
-  try{
-    const resp = await fetch(apiBase() + '/api/status', { method:'GET' });
-    const text = await resp.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = text; }
-    if(!resp.ok){
-      msg.textContent = 'API respondeu com erro.';
-      msg.className = 'err';
-    }else{
-      msg.textContent = 'API online.';
-      msg.className = 'ok';
+    <input name="operador_nome">
+    <button>Enviar</button>
+  </form>
+  <h3>Resposta</h3>
+  <pre id="out"></pre>
+  <script>
+    form.onsubmit = async e => {
+      e.preventDefault();
+      const fd = new FormData(form);
+      const r = await fetch('/api/upload', {method:'POST', body:fd});
+      out.textContent = JSON.stringify(await r.json(), null, 2);
     }
-    show(data);
-  }catch(err){
-    msg.textContent = 'Erro ao conectar com a API.';
-    msg.className = 'err';
-    show(String(err) + "\\n\\nConfira se a API está aberta em: " + apiBase());
-  }
-}
-
-document.getElementById('form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  msg.textContent = 'Enviando...';
-  msg.className = '';
-  out.textContent = '';
-
-  try {
-    const fd = new FormData(e.target);
-    fd.append('origem', 'teste_upload');
-
-    const resp = await fetch(apiBase() + '/api/upload', {
-      method: 'POST',
-      body: fd
-    });
-
-    const text = await resp.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = text; }
-
-    if (!resp.ok) {
-      msg.textContent = 'Falha no envio.';
-      msg.className = 'err';
-    } else {
-      msg.textContent = 'Arquivo enviado com sucesso.';
-      msg.className = 'ok';
-    }
-
-    show(data);
-  } catch (err) {
-    msg.textContent = 'Erro ao conectar com a API.';
-    msg.className = 'err';
-    show(String(err) + "\\n\\nPossíveis causas:\\n1. API não está rodando.\\n2. URL da API está errada.\\n3. Você abriu o HTML direto por arquivo e não pela API.\\n\\nTente abrir: http://localhost:8010/TESTE_UPLOAD.html");
-  }
-});
-
-async function listar(){
-  try{
-    const resp = await fetch(apiBase() + '/api/ars');
-    const data = await resp.json();
-    msg.textContent = 'Lista carregada.';
-    msg.className = 'ok';
-    show(data);
-  }catch(err){
-    msg.textContent = 'Erro ao listar.';
-    msg.className = 'err';
-    show(String(err));
-  }
-}
-</script>
+  </script>
 </body>
 </html>
