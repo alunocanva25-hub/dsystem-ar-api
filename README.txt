@@ -53,3 +53,11 @@ V1.0.0.8_POSTGRES_BASE_XLSX
   POST /api/import-base
   GET /api/base/find
   GET /api/base/stats
+
+
+V1.0.0.9_BASE_FIND_FLEX
+- Corrige busca na base XLSX.
+- Normaliza instalação/medidor/nome removendo espaços, pontos, barras e hífens.
+- Busca por instalação+medidor, depois medidor, depois instalação, depois nome.
+- Adiciona fallback parcial para evitar "não encontrado" por diferenças de formatação.
+- Adiciona POST /api/base/reindex para reindexar bases já importadas.

@@ -17,7 +17,7 @@ try:
 except Exception:
     psycopg2 = None
 
-APP_VERSION = "V1.0.0.8_POSTGRES_BASE_XLSX"
+APP_VERSION = "V1.0.0.9_BASE_FIND_FLEX"
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -180,10 +180,26 @@ def init_db():
                     medidor_norm TEXT,
                     nome_cliente TEXT,
                     nome_norm TEXT,
+                    instalacao_compact TEXT,
+                    medidor_compact TEXT,
+                    nome_compact TEXT,
                     import_batch TEXT,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+
+            for col, typ in [
+                ("instalacao_compact", "TEXT"),
+                ("medidor_compact", "TEXT"),
+                ("nome_compact", "TEXT"),
+            ]:
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name='base_xlsx' AND column_name=%s
+                """, (col,))
+                if not cur.fetchone():
+                    cur.execute(f"ALTER TABLE base_xlsx ADD COLUMN {col} {typ}")
 
             # Migrações defensivas para bases antigas
             for col, typ in [
@@ -192,6 +208,9 @@ def init_db():
                 ("operador_usuario", "TEXT"),
                 ("operador_nome", "TEXT"),
                 ("operador_perfil", "TEXT"),
+                ("instalacao_compact", "TEXT"),
+                ("medidor_compact", "TEXT"),
+                ("nome_compact", "TEXT"),
             ]:
                 cur.execute("""
                     SELECT column_name FROM information_schema.columns
@@ -245,6 +264,9 @@ def init_db():
                     medidor_norm TEXT,
                     nome_cliente TEXT,
                     nome_norm TEXT,
+                    instalacao_compact TEXT,
+                    medidor_compact TEXT,
+                    nome_compact TEXT,
                     import_batch TEXT,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
@@ -260,6 +282,16 @@ def init_db():
             }
             for col, sql in migrations.items():
                 if col not in cols:
+                    cur.execute(sql)
+
+            cols_base_xlsx = [r["name"] for r in cur.execute("PRAGMA table_info(base_xlsx)").fetchall()]
+            base_migrations = {
+                "instalacao_compact": "ALTER TABLE base_xlsx ADD COLUMN instalacao_compact TEXT",
+                "medidor_compact": "ALTER TABLE base_xlsx ADD COLUMN medidor_compact TEXT",
+                "nome_compact": "ALTER TABLE base_xlsx ADD COLUMN nome_compact TEXT",
+            }
+            for col, sql in base_migrations.items():
+                if col not in cols_base_xlsx:
                     cur.execute(sql)
 
         cur.execute(q("SELECT id FROM users WHERE usuario=?"), ("admin",))
@@ -310,6 +342,13 @@ def cell_str(v):
 
 def norm_key(v):
     return re.sub(r"\s+", " ", str(v or "").strip().upper())
+
+def norm_lookup(v):
+    # Busca flexível: remove espaços, pontuação, barras, hífens e zeros/formatos estranhos.
+    return re.sub(r"[^A-Z0-9]", "", norm_key(v))
+
+def only_digits(v):
+    return re.sub(r"\D+", "", str(v or ""))
 
 def base_unique_key(aba, instalacao, medidor, nome_cliente):
     raw = "|".join([norm_key(aba), norm_key(instalacao), norm_key(medidor), norm_key(nome_cliente)])
@@ -819,6 +858,9 @@ def import_base(
                     inst_n = norm_key(inst)
                     md_n = norm_key(md)
                     nome_n = norm_key(nome)
+                    inst_c = norm_lookup(inst)
+                    md_c = norm_lookup(md)
+                    nome_c = norm_lookup(nome)
                     count_seen += 1
 
                     exists_sql = "SELECT id FROM base_xlsx WHERE base_key=?"
@@ -829,17 +871,19 @@ def import_base(
                         cur.execute(q("""
                             UPDATE base_xlsx
                             SET aba=?, instalacao=?, instalacao_norm=?, medidor=?, medidor_norm=?,
-                                nome_cliente=?, nome_norm=?, import_batch=?, updated_at=CURRENT_TIMESTAMP
+                                nome_cliente=?, nome_norm=?, instalacao_compact=?, medidor_compact=?, nome_compact=?,
+                                import_batch=?, updated_at=CURRENT_TIMESTAMP
                             WHERE base_key=?
-                        """), (sh, inst, inst_n, md, md_n, nome, nome_n, batch, bkey))
+                        """), (sh, inst, inst_n, md, md_n, nome, nome_n, inst_c, md_c, nome_c, batch, bkey))
                         count_update += 1
                     else:
                         cur.execute(q("""
                             INSERT INTO base_xlsx(
                                 base_key, aba, instalacao, instalacao_norm,
-                                medidor, medidor_norm, nome_cliente, nome_norm, import_batch
-                            ) VALUES(?,?,?,?,?,?,?,?,?)
-                        """), (bkey, sh, inst, inst_n, md, md_n, nome, nome_n, batch))
+                                medidor, medidor_norm, nome_cliente, nome_norm,
+                                instalacao_compact, medidor_compact, nome_compact, import_batch
+                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                        """), (bkey, sh, inst, inst_n, md, md_n, nome, nome_n, inst_c, md_c, nome_c, batch))
                         count_insert += 1
 
             conn.commit()
@@ -864,39 +908,88 @@ def find_base(instalacao: str = "", medidor: str = "", nome_cliente: str = ""):
     md = norm_key(medidor)
     nome = norm_key(nome_cliente)
 
+    inst_c = norm_lookup(instalacao)
+    md_c = norm_lookup(medidor)
+    nome_c = norm_lookup(nome_cliente)
+
     row = None
 
-    if inst and md:
+    # 1) Melhor caso: instalação + medidor, flexível.
+    if inst_c and md_c:
         row = fetchone("""
             SELECT * FROM base_xlsx
-            WHERE instalacao_norm=? AND medidor_norm=?
+            WHERE instalacao_compact=? AND medidor_compact=?
             ORDER BY updated_at DESC, id DESC LIMIT 1
-        """, (inst, md))
+        """, (inst_c, md_c))
 
-    if not row and md:
+    # 2) Medidor exato/compacto geralmente é a chave mais confiável.
+    if not row and md_c:
         row = fetchone("""
             SELECT * FROM base_xlsx
-            WHERE medidor_norm=?
+            WHERE medidor_compact=?
             ORDER BY updated_at DESC, id DESC LIMIT 1
-        """, (md,))
+        """, (md_c,))
 
-    if not row and inst:
+    # 3) Instalação exata/compacta.
+    if not row and inst_c:
         row = fetchone("""
             SELECT * FROM base_xlsx
-            WHERE instalacao_norm=?
+            WHERE instalacao_compact=?
             ORDER BY updated_at DESC, id DESC LIMIT 1
-        """, (inst,))
+        """, (inst_c,))
 
-    if not row and nome:
-        like_op = "ILIKE" if USE_POSTGRES else "LIKE"
+    # 4) Fallback parcial com LIKE/ILIKE para casos com zeros, hífen ou sufixos.
+    like_op = "ILIKE" if USE_POSTGRES else "LIKE"
+
+    if not row and md_c and len(md_c) >= 4:
         rows = fetchall(f"""
             SELECT * FROM base_xlsx
-            WHERE nome_norm {like_op} ?
+            WHERE medidor_compact {like_op} ?
             ORDER BY updated_at DESC, id DESC LIMIT 1
-        """, (f"%{nome}%",))
+        """, (f"%{md_c}%",))
+        row = rows[0] if rows else None
+
+    if not row and inst_c and len(inst_c) >= 4:
+        rows = fetchall(f"""
+            SELECT * FROM base_xlsx
+            WHERE instalacao_compact {like_op} ?
+            ORDER BY updated_at DESC, id DESC LIMIT 1
+        """, (f"%{inst_c}%",))
+        row = rows[0] if rows else None
+
+    if not row and nome_c and len(nome_c) >= 3:
+        rows = fetchall(f"""
+            SELECT * FROM base_xlsx
+            WHERE nome_compact {like_op} ?
+            ORDER BY updated_at DESC, id DESC LIMIT 1
+        """, (f"%{nome_c}%",))
         row = rows[0] if rows else None
 
     return row or {}
+
+
+
+@app.post("/api/base/reindex")
+def base_reindex():
+    rows = fetchall("SELECT id, instalacao, medidor, nome_cliente FROM base_xlsx")
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for r in rows:
+            cur.execute(q("""
+                UPDATE base_xlsx
+                SET instalacao_compact=?, medidor_compact=?, nome_compact=?
+                WHERE id=?
+            """), (
+                norm_lookup(r.get("instalacao")),
+                norm_lookup(r.get("medidor")),
+                norm_lookup(r.get("nome_cliente")),
+                r.get("id")
+            ))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "updated": len(rows)}
 
 
 @app.get("/api/base/stats")
