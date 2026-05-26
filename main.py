@@ -8,6 +8,8 @@ from datetime import datetime
 import os
 import re
 import sqlite3
+import hashlib
+import shutil
 
 try:
     import psycopg2
@@ -15,7 +17,7 @@ try:
 except Exception:
     psycopg2 = None
 
-APP_VERSION = "V1.0.0.7_POSTGRES"
+APP_VERSION = "V1.0.0.8_POSTGRES_BASE_XLSX"
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -24,6 +26,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL)
 
 SQLITE_DB = BASE_DIR / "dsystem_ar_api.db"
+BASE_XLSX_CACHE = BASE_DIR / "base_xlsx_cache.xlsx"
+HEADER_ROW = 5
+START_COL = 2
 
 app = FastAPI(
     title="DSYSTEM AR API",
@@ -163,6 +168,23 @@ def init_db():
                 )
             """)
 
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS base_xlsx (
+                    id SERIAL PRIMARY KEY,
+                    base_key TEXT UNIQUE NOT NULL,
+                    aba TEXT,
+                    instalacao TEXT,
+                    instalacao_norm TEXT,
+                    medidor TEXT,
+                    medidor_norm TEXT,
+                    nome_cliente TEXT,
+                    nome_norm TEXT,
+                    import_batch TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Migrações defensivas para bases antigas
             for col, typ in [
                 ("file_data", "BYTEA"),
@@ -211,6 +233,23 @@ def init_db():
                 )
             """)
 
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS base_xlsx (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    base_key TEXT UNIQUE NOT NULL,
+                    aba TEXT,
+                    instalacao TEXT,
+                    instalacao_norm TEXT,
+                    medidor TEXT,
+                    medidor_norm TEXT,
+                    nome_cliente TEXT,
+                    nome_norm TEXT,
+                    import_batch TEXT,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             cols = [r["name"] for r in cur.execute("PRAGMA table_info(ars)").fetchall()]
             migrations = {
                 "file_data": "ALTER TABLE ars ADD COLUMN file_data BLOB",
@@ -254,6 +293,46 @@ def media_type_from_ext(ext: str) -> str:
     return "application/octet-stream"
 
 
+
+def norm_header(v):
+    s = str(v or "").strip().upper()
+    mapa = {"Á":"A","À":"A","Â":"A","Ã":"A","É":"E","Ê":"E","Í":"I","Ó":"O","Õ":"O","Ô":"O","Ú":"U","Ç":"C"}
+    for a,b in mapa.items():
+        s = s.replace(a,b)
+    return re.sub(r"\s+", " ", s)
+
+def cell_str(v):
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v).strip()
+
+def norm_key(v):
+    return re.sub(r"\s+", " ", str(v or "").strip().upper())
+
+def base_unique_key(aba, instalacao, medidor, nome_cliente):
+    raw = "|".join([norm_key(aba), norm_key(instalacao), norm_key(medidor), norm_key(nome_cliente)])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+def auto_col(headers_norm, names):
+    for target in names:
+        t = norm_header(target)
+        for i,h in enumerate(headers_norm):
+            if h == t or t in h:
+                return i + 1
+    return None
+
+def load_xlsx_book_readonly():
+    try:
+        from openpyxl import load_workbook
+    except Exception:
+        raise HTTPException(500, detail="openpyxl não instalado")
+    if not BASE_XLSX_CACHE.exists():
+        raise HTTPException(404, detail="Nenhuma base XLSX importada ainda")
+    return load_workbook(BASE_XLSX_CACHE, data_only=True, read_only=True)
+
+
 def build_name(instalacao: str = "", medidor: str = "", ext: str = ".pdf") -> str:
     instalacao = (instalacao or "").strip()
     medidor = (medidor or "").strip()
@@ -284,7 +363,10 @@ def root():
             "/api/ars",
             "/api/upload",
             "/api/ars/{id}/download",
-            "/api/ars/{id}/view"
+            "/api/ars/{id}/view",
+            "/api/upload-base-cache",
+            "/api/import-base",
+            "/api/base/find"
         ]
     }
 
@@ -644,6 +726,183 @@ def view_ar(ar_id: int):
         return FileResponse(path, media_type=mime_type)
 
     raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
+
+
+
+@app.post("/api/upload-base-cache")
+async def upload_base_cache(file: UploadFile = File(...)):
+    if not (file.filename or "").lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Envie um arquivo XLSX")
+
+    with BASE_XLSX_CACHE.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+
+    wb = load_xlsx_book_readonly()
+    try:
+        sheets = list(wb.sheetnames)
+    finally:
+        wb.close()
+
+    return {"ok": True, "sheets": sheets}
+
+
+@app.get("/api/base/sheets")
+def base_sheets():
+    wb = load_xlsx_book_readonly()
+    try:
+        return {"sheets": list(wb.sheetnames)}
+    finally:
+        wb.close()
+
+
+@app.get("/api/base/columns")
+def base_columns(sheet: str):
+    wb = load_xlsx_book_readonly()
+    try:
+        if sheet not in wb.sheetnames:
+            raise HTTPException(404, detail="Aba não encontrada")
+        ws = wb[sheet]
+        headers = [cell_str(ws.cell(HEADER_ROW, col).value) for col in range(START_COL, ws.max_column + 1)]
+        return {"columns": headers}
+    finally:
+        wb.close()
+
+
+@app.post("/api/import-base")
+def import_base(
+    sheet: str = Form("TODAS"),
+    col_instalacao: str = Form(""),
+    col_medidor: str = Form(""),
+    col_nome_cliente: str = Form("")
+):
+    wb = load_xlsx_book_readonly()
+    batch = datetime.now().strftime("%Y%m%d%H%M%S")
+    count_insert = 0
+    count_update = 0
+    count_seen = 0
+
+    try:
+        sheets = list(wb.sheetnames) if sheet == "TODAS" else [sheet]
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            for sh in sheets:
+                if sh not in wb.sheetnames:
+                    continue
+
+                ws = wb[sh]
+                headers_raw = [cell_str(ws.cell(HEADER_ROW, col).value) for col in range(START_COL, ws.max_column + 1)]
+                headers_norm = [norm_header(h) for h in headers_raw]
+
+                def col_by_selected(sel, auto_names):
+                    if sel:
+                        try:
+                            return headers_raw.index(sel) + START_COL
+                        except ValueError:
+                            pass
+                    idx = auto_col(headers_norm, auto_names)
+                    return (idx + START_COL - 1) if idx else None
+
+                col_i = col_by_selected(col_instalacao, ["INSTALACAO","INST","UC","UNIDADE CONSUMIDORA","INSTALAÇÃO"])
+                col_m = col_by_selected(col_medidor, ["MEDIDOR","MD","N MEDIDOR","NUMERO MEDIDOR","SERIAL","N DE SERIE","Nº MEDIDOR"])
+                col_n = col_by_selected(col_nome_cliente, ["NOME_CLIENTE","NOME CLIENTE","CLIENTE","NOME","NOME DO CLIENTE"])
+
+                for row in range(HEADER_ROW + 1, ws.max_row + 1):
+                    inst = cell_str(ws.cell(row, col_i).value) if col_i else ""
+                    md = cell_str(ws.cell(row, col_m).value) if col_m else ""
+                    nome = cell_str(ws.cell(row, col_n).value) if col_n else ""
+
+                    if not (inst or md or nome):
+                        continue
+
+                    bkey = base_unique_key(sh, inst, md, nome)
+                    inst_n = norm_key(inst)
+                    md_n = norm_key(md)
+                    nome_n = norm_key(nome)
+                    count_seen += 1
+
+                    exists_sql = "SELECT id FROM base_xlsx WHERE base_key=?"
+                    cur.execute(q(exists_sql), (bkey,))
+                    exists = cur.fetchone()
+
+                    if exists:
+                        cur.execute(q("""
+                            UPDATE base_xlsx
+                            SET aba=?, instalacao=?, instalacao_norm=?, medidor=?, medidor_norm=?,
+                                nome_cliente=?, nome_norm=?, import_batch=?, updated_at=CURRENT_TIMESTAMP
+                            WHERE base_key=?
+                        """), (sh, inst, inst_n, md, md_n, nome, nome_n, batch, bkey))
+                        count_update += 1
+                    else:
+                        cur.execute(q("""
+                            INSERT INTO base_xlsx(
+                                base_key, aba, instalacao, instalacao_norm,
+                                medidor, medidor_norm, nome_cliente, nome_norm, import_batch
+                            ) VALUES(?,?,?,?,?,?,?,?,?)
+                        """), (bkey, sh, inst, inst_n, md, md_n, nome, nome_n, batch))
+                        count_insert += 1
+
+            conn.commit()
+        finally:
+            conn.close()
+
+    finally:
+        wb.close()
+
+    return {
+        "ok": True,
+        "count": count_seen,
+        "inserted": count_insert,
+        "updated": count_update,
+        "sheets": sheets
+    }
+
+
+@app.get("/api/base/find")
+def find_base(instalacao: str = "", medidor: str = "", nome_cliente: str = ""):
+    inst = norm_key(instalacao)
+    md = norm_key(medidor)
+    nome = norm_key(nome_cliente)
+
+    row = None
+
+    if inst and md:
+        row = fetchone("""
+            SELECT * FROM base_xlsx
+            WHERE instalacao_norm=? AND medidor_norm=?
+            ORDER BY updated_at DESC, id DESC LIMIT 1
+        """, (inst, md))
+
+    if not row and md:
+        row = fetchone("""
+            SELECT * FROM base_xlsx
+            WHERE medidor_norm=?
+            ORDER BY updated_at DESC, id DESC LIMIT 1
+        """, (md,))
+
+    if not row and inst:
+        row = fetchone("""
+            SELECT * FROM base_xlsx
+            WHERE instalacao_norm=?
+            ORDER BY updated_at DESC, id DESC LIMIT 1
+        """, (inst,))
+
+    if not row and nome:
+        like_op = "ILIKE" if USE_POSTGRES else "LIKE"
+        rows = fetchall(f"""
+            SELECT * FROM base_xlsx
+            WHERE nome_norm {like_op} ?
+            ORDER BY updated_at DESC, id DESC LIMIT 1
+        """, (f"%{nome}%",))
+        row = rows[0] if rows else None
+
+    return row or {}
+
+
+@app.get("/api/base/stats")
+def base_stats():
+    row = fetchone("SELECT COUNT(*) AS total FROM base_xlsx")
+    return {"ok": True, "total": int((row or {}).get("total", 0) or 0)}
 
 
 @app.get("/TESTE_UPLOAD.html")

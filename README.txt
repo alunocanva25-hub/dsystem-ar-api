@@ -39,3 +39,17 @@ GET  /api/ars/{id}/view
 OBSERVAÇÃO IMPORTANTE
 Esta versão salva os arquivos em file_data no banco PostgreSQL.
 Assim, os PDFs não dependem mais da pasta local uploads do Render.
+
+V1.0.0.8_POSTGRES_BASE_XLSX
+- Adiciona cache/processamento de XLSX na API.
+- A base XLSX é processada no servidor da API e salva no PostgreSQL.
+- Não duplica registros idênticos: usa chave aba + instalação + medidor + nome_cliente.
+- Se a mesma informação for importada novamente, atualiza o registro.
+- Se instalação for igual mas medidor/nome forem diferentes, adiciona como novo registro.
+- Endpoints compatíveis com painel:
+  POST /api/upload-base-cache
+  GET /api/base/sheets
+  GET /api/base/columns
+  POST /api/import-base
+  GET /api/base/find
+  GET /api/base/stats
